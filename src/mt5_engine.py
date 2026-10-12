@@ -61,6 +61,22 @@ class MT5Engine:
             self._is_initialized = False
             return False
 
+        # If specific login was requested and terminal was open on another account
+        if self.config.mt5_login:
+            current_acc = mt5.account_info()
+            if not current_acc or current_acc.login != self.config.mt5_login:
+                login_kwargs = {"login": self.config.mt5_login}
+                if self.config.mt5_password:
+                    login_kwargs["password"] = self.config.mt5_password
+                if self.config.mt5_server:
+                    login_kwargs["server"] = self.config.mt5_server
+                logger.info(f"Logging in / switching to MT5 account {self.config.mt5_login}...")
+                if not mt5.login(**login_kwargs):
+                    error = mt5.last_error()
+                    logger.error(f"MT5 login to {self.config.mt5_login} failed: {error}")
+                    self._is_initialized = False
+                    return False
+
         self._is_initialized = True
         acc_info = mt5.account_info()
         if acc_info:

@@ -13,6 +13,7 @@ class BridgeConfig:
         default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     )
     allowed_users: List[int] = field(default_factory=list)
+    telegram_proxy: Optional[str] = None
     
     # MT5 connection options
     mt5_login: Optional[int] = None
@@ -45,6 +46,15 @@ class BridgeConfig:
         password = os.getenv("MT5_PASSWORD", "").strip() or None
         server = os.getenv("MT5_SERVER", "").strip() or None
         path = os.getenv("MT5_PATH", "").strip() or None
+        if not path:
+            candidate_paths = [
+                r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe",
+                r"C:\Program Files\Exness MetaTrader 5\terminal64.exe",
+            ]
+            for c_path in candidate_paths:
+                if os.path.exists(c_path):
+                    path = c_path
+                    break
 
         lot_raw = os.getenv("DEFAULT_LOT_SIZE", "0.01").strip()
         try:
@@ -69,9 +79,12 @@ class BridgeConfig:
         dry_run = os.getenv("DRY_RUN", "False").strip().lower() in ("true", "1", "yes")
         log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
+        telegram_proxy = os.getenv("TELEGRAM_PROXY", "").strip() or None
+
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             allowed_users=allowed_users,
+            telegram_proxy=telegram_proxy,
             mt5_login=mt5_login,
             mt5_password=password,
             mt5_server=server,

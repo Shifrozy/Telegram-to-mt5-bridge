@@ -1,6 +1,8 @@
+import asyncio
 import logging
 from typing import Optional
 from telegram import Update
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -27,12 +29,53 @@ class TelegramBridgeBot:
         self.parser = SignalParser(default_volume=config.default_lot_size)
         self.app: Optional[Application] = None
 
+    async def _safe_reply(self, message, text: str, **kwargs):
+        """Replies to a message with automatic retry on timeout/network error."""
+        if not message:
+            return None
+        for attempt in range(1, 4):
+            try:
+                return await message.reply_text(text, **kwargs)
+            except Exception as e:
+                logger.warning(f"Telegram reply error (attempt {attempt}/3): {e}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(f"Failed to send Telegram message after 3 attempts.")
+                    return None
+
+    async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        """Log errors caused by updates and network timeouts gracefully."""
+        logger.error(f"Telegram handler error: {context.error}")
+
     def build_application(self) -> Application:
-        """Configures and builds the telegram Application."""
+        """Configures and builds the telegram Application with resilient timeouts and proxy support."""
         if not self.config.telegram_bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment or .env file.")
 
-        app = ApplicationBuilder().token(self.config.telegram_bot_token).build()
+        request_kwargs = {
+            "connection_pool_size": 8,
+            "connect_timeout": 60.0,
+            "read_timeout": 60.0,
+            "write_timeout": 60.0,
+            "pool_timeout": 60.0,
+        }
+        if self.config.telegram_proxy:
+            request_kwargs["proxy"] = self.config.telegram_proxy
+            logger.info(f"Using Telegram proxy: {self.config.telegram_proxy}")
+
+        request = HTTPXRequest(**request_kwargs)
+        get_updates_request = HTTPXRequest(**request_kwargs)
+
+        app = (
+            ApplicationBuilder()
+            .token(self.config.telegram_bot_token)
+            .request(request)
+            .get_updates_request(get_updates_request)
+            .build()
+        )
+
+        app.add_error_handler(self._error_handler)
 
         # Command handlers
         app.add_handler(CommandHandler("start", self._cmd_start))
@@ -78,7 +121,7 @@ class TelegramBridgeBot:
             f"• `/help` - Signal formatting guide\n\n"
             f"Simply send or forward trading signals to this chat or add this bot to your signal channel."
         )
-        await update.effective_message.reply_text(welcome_msg, parse_mode="Markdown")
+        await self._safe_reply(update.effective_message, welcome_msg, parse_mode="Markdown")
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /help command."""
@@ -96,17 +139,17 @@ class TelegramBridgeBot:
             "```\nCLOSE EURUSD\nCLOSE ALL\n```\n\n"
             "Aliases like `GOLD` (XAUUSD), `SILVER` (XAGUSD), and `US30` are supported automatically."
         )
-        await update.effective_message.reply_text(help_msg, parse_mode="Markdown")
+        await self._safe_reply(update.effective_message, help_msg, parse_mode="Markdown")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /status command."""
         if not self._is_authorized(update):
-            await update.effective_message.reply_text("⛔ Unauthorized. Your ID is not in `TELEGRAM_ALLOWED_USERS`.")
+            await self._safe_reply(update.effective_message, "⛔ Unauthorized. Your ID is not in `TELEGRAM_ALLOWED_USERS`.")
             return
 
         summary = self.engine.get_account_summary()
         if "error" in summary:
-            await update.effective_message.reply_text(f"❌ *MT5 Connection Error:*\n{summary['error']}", parse_mode="Markdown")
+            await self._safe_reply(update.effective_message, f"❌ *MT5 Connection Error:*\n{summary['error']}", parse_mode="Markdown")
             return
 
         status_msg = (
@@ -121,17 +164,17 @@ class TelegramBridgeBot:
             f"• *Trade Allowed:* {'✅ Yes' if summary['trade_allowed'] else '❌ No'}\n"
             f"• *Dry-Run Mode:* {'🟢 Active' if self.config.dry_run else '🔴 Live Trading'}"
         )
-        await update.effective_message.reply_text(status_msg, parse_mode="Markdown")
+        await self._safe_reply(update.effective_message, status_msg, parse_mode="Markdown")
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /positions command."""
         if not self._is_authorized(update):
-            await update.effective_message.reply_text("⛔ Unauthorized.")
+            await self._safe_reply(update.effective_message, "⛔ Unauthorized.")
             return
 
         positions = self.engine.get_open_positions()
         if not positions:
-            await update.effective_message.reply_text("ℹ️ No open positions on MT5.")
+            await self._safe_reply(update.effective_message, "ℹ️ No open positions on MT5.")
             return
 
         msg = f"📋 *Open Positions ({len(positions)}):*\n\n"
@@ -143,27 +186,27 @@ class TelegramBridgeBot:
                 f"  SL: `{p['sl']}` | TP: `{p['tp']}`\n"
                 f"  Profit: *{p['profit']:.2f}*\n\n"
             )
-        await update.effective_message.reply_text(msg, parse_mode="Markdown")
+        await self._safe_reply(update.effective_message, msg, parse_mode="Markdown")
 
     async def _cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /closeall command."""
         if not self._is_authorized(update):
-            await update.effective_message.reply_text("⛔ Unauthorized.")
+            await self._safe_reply(update.effective_message, "⛔ Unauthorized.")
             return
 
-        await update.effective_message.reply_text("⏳ Closing all positions...")
+        await self._safe_reply(update.effective_message, "⏳ Closing all positions...")
         res = self.engine.close_all_positions()
         if res.success:
-            await update.effective_message.reply_text(f"✅ *Success:* {res.comment}", parse_mode="Markdown")
+            await self._safe_reply(update.effective_message, f"✅ *Success:* {res.comment}", parse_mode="Markdown")
         else:
-            await update.effective_message.reply_text(f"❌ *Failed to close:* {res.comment}", parse_mode="Markdown")
+            await self._safe_reply(update.effective_message, f"❌ *Failed to close:* {res.comment}", parse_mode="Markdown")
 
     async def _cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Simulates a test signal."""
         test_msg = "BUY EURUSD\nSL: 1.0800\nTP: 1.0900"
         signal = self.parser.parse(test_msg)
         if not signal:
-            await update.effective_message.reply_text("Failed to create test signal.")
+            await self._safe_reply(update.effective_message, "Failed to create test signal.")
             return
 
         # Force dry run for test command
@@ -172,7 +215,7 @@ class TelegramBridgeBot:
         try:
             res = self.engine.execute_signal(signal)
             reply = self._format_execution_response(signal, res)
-            await update.effective_message.reply_text(f"🧪 *Test Execution Result:*\n\n{reply}", parse_mode="Markdown")
+            await self._safe_reply(update.effective_message, f"🧪 *Test Execution Result:*\n\n{reply}", parse_mode="Markdown")
         finally:
             self.config.dry_run = prev_dry
 
@@ -195,7 +238,7 @@ class TelegramBridgeBot:
         logger.info(f"Signal detected: {signal.action.value} {signal.symbol} (Vol: {signal.volume})")
         res = self.engine.execute_signal(signal)
         reply = self._format_execution_response(signal, res)
-        await msg.reply_text(reply, parse_mode="Markdown")
+        await self._safe_reply(msg, reply, parse_mode="Markdown")
 
     def _format_execution_response(self, signal: TradeSignal, res: ExecutionResult) -> str:
         """Formats the execution result into a clear Telegram message."""
